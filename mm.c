@@ -68,9 +68,15 @@ team_t team = {
 #define NEXT_BLKP(bp)  ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE))) //bp를 이용해 다음 블록의 주소를 계산. 지금 블록의 헤더에서 사이즈를 읽고 그 사이즈만큼 더함
 #define PREV_BLKP(bp)  ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE))) //bp를 이용해 이전 블록의 주소를 계산. 이전 블록의 푸터에서 사이즈를 읽고 그 사이즈만큼 뺌
 
+#define NEXT_FIT //next fit 방식 적용. 주석 처리하면 first fit으로 작동
+
 /* global variable & functions */
 static char* heap_listp; // 항상 prologue block을 가리키는 정적 전역 변수 설정
                         // static 변수는 함수 내부(지역)에서도 사용이 가능하고 함수 외부(전역)에서도 사용이 가능하다.
+
+#ifdef NEXT_FIT               // #ifdef ~ #endif를 통해 조건부로 컴파일이 가능하다. NEXT_FIT이 선언되어 있다면 밑의 변수를 컴파일 할 것이다.
+    static void* last_freep; // next_fit 사용 시 마지막으로 탐색한 free 블록을 가리키는 포인터이다.
+#endif                        
 
 static void* extend_heap(size_t words);
 static void* coalesce(void *bp);
@@ -95,6 +101,10 @@ int mm_init(void) {
     PUT(heap_listp + (2*WSIZE), PACK(DSIZE, 1)); //prologue footer. 헤더와 동일해야 한다.
     PUT(heap_listp + (3*WSIZE), PACK(0, 1)); //Epilogue header
     heap_listp += (2*WSIZE); //heap_listp가 prologue footer를 가리키도록 조정
+
+    #ifdef NEXT_FIT //next fit 방식이라면
+        last_freep = heap_listp; //last_freep를 heap_listp와 일치시킴
+    #endif
 
     if (extend_heap(CHUNKSIZE/WSIZE) == NULL) { //바로 CHUNKSIZE(2^12 byte) 만큼 heap을 확장해 초기 free블록을 생성.
         return -1;
@@ -207,6 +217,10 @@ static void *coalesce(void *bp) {
         bp = PREV_BLKP(bp); 
     }
 
+    #ifdef NEXT_FIT
+        last_freep = bp; //현재 bp를 last_freep로 설정
+    #endif
+
     return bp;
 }
 
@@ -232,15 +246,35 @@ void *mm_realloc(void *ptr, size_t size) {
 }
 
 static void *find_fit(size_t asize) {
-    void *bp;
+    //next fit 방식
+    #ifdef NEXT_FIT
 
-    for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) { // heap_listp, 즉 prologue부터 탐색한다. 전에 우리는 heap_listp += (2 * WSIZE)를 해두었다.
-        if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))) { // 할당된 상태가 아니면서 해당 블록의 사이즈가 asize보다 크다면 해당 블록에 할당이 가능하므로 곧바로 bp를 반환한다.
-            return bp;
+        void *bp;
+        void *old_last_freep = last_freep;
+
+        for (bp = last_freep; GET_SIZE(HDRP(bp)) > 0;bp = NEXT_BLKP(bp)) {
+            if(!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))) {
+                return bp;
+            }
         }
-    }
+
+        last_freep = bp;
+
+        return NULL;
     
-    return NULL; //맞는 영역 없음.
+    #else //first fit 방식
+    
+        void *bp;
+
+        for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) { // heap_listp, 즉 prologue부터 탐색한다. 전에 우리는 heap_listp += (2 * WSIZE)를 해두었다.
+            if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))) { // 할당된 상태가 아니면서 해당 블록의 사이즈가 asize보다 크다면 해당 블록에 할당이 가능하므로 곧바로 bp를 반환한다.
+                return bp;
+            }
+        }
+        
+        return NULL; //맞는 영역 없음.
+
+    #endif
 }
 
 
