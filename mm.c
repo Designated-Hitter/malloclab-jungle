@@ -46,7 +46,7 @@ team_t team = {
 
 #define WSIZE 4 //word와 header, footer size = 4bytes
 #define DSIZE 8 //double word size = 8bytes
-#define MINIMUM 16
+#define LISTLIMIT 20 //list의 limit 설정
 #define CHUNKSIZE (1<<12) //sbrk 함수로 늘어나는 힙의 양 (2^12 byte). 이진수 1을 왼쪽으로 12칸 민다 1 -> 1000000000000 
 
 #define MAX(x,y) ((x) > (y)? (x) : (y))
@@ -73,14 +73,16 @@ team_t team = {
 
 
 /* global variable & functions */
-static char* heap_listp; // 항상 prologue block을 가리키는 정적 전역 변수 설정
+static void* heap_listp; // 항상 prologue block을 가리키는 정적 전역 변수 설정
                          // static 변수는 함수 내부(지역)에서도 사용이 가능하고 함수 외부(전역)에서도 사용이 가능하다.
-static char* free_listp; //free list의 맨 첫 블록을 가리키는 포인터
+static void* segragation_list[LISTLIMIT];
 
 static void* extend_heap(size_t words);
 static void* coalesce(void* bp);
 static void* find_fit(size_t asize);
 static void place(void* bp, size_t newsize);
+static void removeBlock(void* bp);
+static void insertBlock(void* bp, size_t size);
 
 int mm_init(void);
 void *mm_malloc(size_t size);
@@ -92,19 +94,22 @@ void *mm_realloc(void *ptr, size_t newsize);
  * mm_init - initialize the malloc package.
  */
 int mm_init(void) {
-    //unused padding, prologue header / prologue footer, predecessor / successor, epilogue header /
-    if ((heap_listp = mem_sbrk(6 * WSIZE)) == (void*) -1) { //memlib.c 파일내의 mem_sbrk함수는 heap영역을 늘리는데에 실패하면 (void*)-1을 반환한다.
+    //seglist의 포인터 전부 초기화
+    int list;
+    for (list = 0; list < LISTLIMIT; list++) {
+        segragation_list[list] = NULL;
+    }
+    if ((heap_listp = mem_sbrk(4 * WSIZE)) == (void*) -1) { //memlib.c 파일내의 mem_sbrk함수는 heap영역을 늘리는데에 실패하면 (void*)-1을 반환한다.
         return -1;
     }
 
     PUT(heap_listp, 0); //alignment padding.
-    PUT(heap_listp + (1 * WSIZE), PACK(MINIMUM, 1)); //prologue header. MINIMUM = 16byte, header + prec + succ + footer = 16
-    PUT(heap_listp + (2 * WSIZE), NULL); //PREC
-    PUT(heap_listp + (3 * WSIZE), NULL); //SUCC
-    PUT(heap_listp + (4 * WSIZE), PACK(MINIMUM, 1)); //prologue footer.
-    PUT(heap_listp + (5 * WSIZE), PACK(0, 1)); //epilogue header.
+    PUT(heap_listp + (1 * WSIZE), PACK(DSIZE, 1)); //prologue header
+    PUT(heap_listp + (2 * WSIZE), PACK(DSIZE, 1)); //prologue footer
+    PUT(heap_listp + (3 * WSIZE), PACK(0, 1)); //epliogue header 
 
-    free_listp = heap_listp + 2 * WSIZE; //free_listp를 prologue header의 위치로 초기화
+
+    heap_listp += (2 * WSIZE); //heap_listp를 prologue header의 위치로 초기화
 
     if (extend_heap(CHUNKSIZE/WSIZE) == NULL) { //바로 CHUNKSIZE(2^12 byte) 만큼 heap을 확장해 초기 free블록을 생성.
         return -1;
@@ -151,8 +156,8 @@ void *mm_malloc(size_t size) {
         return bp;
     }
 
-    extendsize = MAX(asize, CHUNKSIZE); 
-    if ((bp = extend_heap(extendsize/WSIZE)) == NULL) { //extend_heap이 실패시 NULL을 반환함
+    extendsize = MAX(asize, CHUNKSIZE); //적당한 공간을 찾지 못했다면 heap을 (CHUNKSIZE) 또는 asize 중 더 큰 값만큼 늘려줌
+    if ((bp = extend_heap(extendsize / WSIZE)) == NULL) { //extend_heap이 실패시 NULL을 반환함
         return NULL;
     }
 
@@ -178,7 +183,7 @@ static void *coalesce(void *bp) {
     
     //case 1. 인접 블록이 모두 할당중
     if (prev_alloc && next_alloc) {
-        putFreeBlock(bp); 
+        insertBlock(bp, size); 
         return bp;
     }
 
@@ -210,7 +215,7 @@ static void *coalesce(void *bp) {
 
     }
 
-    putFreeBlock(bp);
+    insertBlock(bp, size);
 
     return bp;
 }
@@ -226,11 +231,17 @@ void *mm_realloc(void *ptr, size_t size) {
     size_t copySize;
     
     newptr = mm_malloc(size);
-    if (newptr == NULL)
+
+    if (newptr == NULL) {
       return NULL;
+    }
+
     copySize = GET_SIZE(HDRP(oldptr));
-    if (size < copySize) //영역의 크기를 줄이는 것이라면 그냥 줄인다. 사라지는 공간의 데이터는 잘리게 된다.
-      copySize = size;
+
+    if (size < copySize) { //영역의 크기를 줄이는 것이라면 그냥 줄인다. 사라지는 공간의 데이터는 잘리게 된다.
+        copySize = size;
+    } 
+      
     memcpy(newptr, oldptr, copySize); //늘린다면 예전 영역의 내용을 새 영역에 복사한다. oldptr부터 copySize까지의 데이터를 newptr부터 심는다는 뜻.
     mm_free(oldptr); //예전 oldptr 영역은 free로 반환
     return newptr;
@@ -240,10 +251,25 @@ static void* find_fit(size_t asize) {
 
     void* bp;
 
-    for (bp = free_listp; GET_ALLOC(HDRP(bp)) != 1; bp = SUCC_FREEP(bp)) {
-        if (asize <= GET_SIZE(HDRP(bp))) {
-            return bp;
+    int list = 0;
+    size_t searchSize = asize;
+
+    while (list < LISTLIMIT) {
+
+        if ((list == LISTLIMIT - 1) || (searchSize <= 1) && (segragation_list[list] != NULL)) {
+            bp = segragation_list[list];
+
+            while((bp != NULL) && (asize > GET_SIZE(HDRP(bp)))) {
+                bp = SUCC_FREEP(bp);
+            }
+
+            if (bp != NULL) {
+                return bp;
+            }
         }
+
+        searchSize >>= 1; // seachsize를 2로 나눠가면서(shift 비트연산을 하면서) while문에서 적절한 사이즈를 가진 연결리스트를 찾도록 해준다.
+        list++;
     }
 
     return NULL;
@@ -257,30 +283,87 @@ static void place(void* bp, size_t asize) {
     if ((csize - asize) >= (2*DSIZE)) { // 분할 할 수 있는 경우. free블록의 최소 사이즈는 header 1word, footer 1word, pred 1word, succ 1word 로 총 4words = 16bytes이다.
         PUT(HDRP(bp), PACK(asize, 1));
         PUT(FTRP(bp), PACK(asize, 1));
+
         bp = NEXT_BLKP(bp);
         PUT(HDRP(bp), PACK(csize - asize, 0));
         PUT(FTRP(bp), PACK(csize - asize, 0));
 
-        putFreeBlock(bp); //새롭게 분할된 free블록이 리스트의 첫번째에 추가
+        coalesce(bp);
     } else { //분할이 불가능한 경우
         PUT(HDRP(bp), PACK(csize, 1));
         PUT(FTRP(bp), PACK(csize, 1));
     }
 }
 
-void removeBlock(void *bp) {
-    if (bp == free_listp) { //bp가 free list의 처음을 가리킬 때
-        PREC_FREEP(SUCC_FREEP(bp)) = NULL; //다음 free 블록의 prec을 null로 바꿔서 이전으로의 연결 끊음
-        free_listp = SUCC_FREEP(bp); //다음 블록을 free_list의 처음으로 설정
-    } else {
-        SUCC_FREEP(PREC_FREEP(bp)) = SUCC_FREEP(bp); //이전블록의 SUCC를 이후블록으로 변경
-        PREC_FREEP(SUCC_FREEP(bp)) = PREC_FREEP(bp); //이후블록의 PREC를 이전블록으로 변경
+static void removeBlock(void *bp) {
+    int list = 0;
+    size_t size = GET_SIZE(HDRP(bp));
+
+    while ((list <LISTLIMIT - 1) && (size > 1)) {
+        size >>= 1;
+        list++;
     }
+
+    if (SUCC_FREEP(bp) != NULL) {
+        if (PREC_FREEP(bp) != NULL) {
+            PREC_FREEP(SUCC_FREEP(bp)) = PREC_FREEP(bp);
+            SUCC_FREEP(PREC_FREEP(bp)) = SUCC_FREEP(bp);
+        } else {
+            PREC_FREEP(SUCC_FREEP(bp)) = NULL;
+            segragation_list[list] = SUCC_FREEP(bp);
+        }
+    } else {
+        if (PREC_FREEP(bp) != NULL) {
+            SUCC_FREEP(PREC_FREEP(bp)) = NULL;
+        } else {
+            segragation_list[list] = NULL;
+        }
+    }
+
+    return;
 }
 
-void putFreeBlock (void* bp) { //free가 되거나, 연결되어 새롭게 수정된 free블록을 free list의 맨 처음에 넣는다.
-    SUCC_FREEP(bp) = free_listp; //현재 bp의 SUCC을 free블록의 처음으로 변경
-    PREC_FREEP(bp) = NULL; //현재 bp의 PREC을 NULL로 변경
-    PREC_FREEP(free_listp) = bp; //free_listp의 PREC를 bp로 변경
-    free_listp = bp; //bp를 free_list의 처음으로
+static void insertBlock(void *bp, size_t size) {
+    int list = 0;
+    void *search_ptr;
+    void *insert_ptr = NULL;
+
+    while ((list < LISTLIMIT - 1) && (size > 1)) {
+        size >>= 1;
+        list++;
+    }
+
+    search_ptr = segragation_list[list];
+
+    while ((search_ptr != NULL) && (size > GET_SIZE(HDRP(search_ptr)))) {
+        insert_ptr = search_ptr;
+        search_ptr = SUCC_FREEP(search_ptr);
+    }
+
+    if (search_ptr != NULL) {
+        if (insert_ptr != NULL) {
+            SUCC_FREEP(bp) = search_ptr;
+            PREC_FREEP(bp) = insert_ptr;
+            PREC_FREEP(search_ptr) = bp;
+            SUCC_FREEP(insert_ptr) = bp;
+        } else {
+            SUCC_FREEP(bp) = search_ptr;
+            PREC_FREEP(bp) = insert_ptr;
+            PREC_FREEP(search_ptr) = bp;
+            segragation_list[list] = bp;
+        }
+    } else {
+        if (insert_ptr != NULL) {
+            SUCC_FREEP(bp) = NULL;
+            PREC_FREEP(bp) = insert_ptr;
+            SUCC_FREEP(insert_ptr) = bp;
+        } else {
+            SUCC_FREEP(bp) = NULL;
+            PREC_FREEP(bp) = NULL;
+            segragation_list[list] = bp;
+        }
+    }
+     
+    return;
+
 }
