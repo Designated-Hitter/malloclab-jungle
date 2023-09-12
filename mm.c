@@ -47,7 +47,7 @@ team_t team = {
 #define WSIZE 4 //word와 header, footer size = 4bytes
 #define DSIZE 8 //double word size = 8bytes
 #define LISTLIMIT 20 //list의 limit 설정
-#define CHUNKSIZE (1<<12) //sbrk 함수로 늘어나는 힙의 양 (2^12 byte). 이진수 1을 왼쪽으로 12칸 민다 1 -> 1000000000000 
+#define CHUNKSIZE (1<<8) //sbrk 함수로 늘어나는 힙의 양 (2^12 byte). 이진수 1을 왼쪽으로 12칸 민다 1 -> 1000000000000 
 
 #define MAX(x,y) ((x) > (y)? (x) : (y))
 
